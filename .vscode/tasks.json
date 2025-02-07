@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run Python Script",
+            "type": "shell",
+            "command": "/fred/oz305/haojiang/Lafter/packages/.conda/envs/lafter/bin/python",
+            "args": [
+                "main.py",
+                "--dataset", "cifartoy_bad",
+                "--data_path", "/fred/oz305/haojiang/code/MaskCon_CVPR2023-main/Data/cifartoy",
+                "--wandb_id", "cifartoy_bad",
+                "--t0", "0.1",
+                "--t", "0.05",
+                "--w", "1.0",
+                "--mode", "maskcon",
+                "--gpu_id", "0",
+                "--aug_q", "strong",
+                "--aug_k", "weak"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": []
+        }
+    ]
+}

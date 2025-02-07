@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run Python Script",
+            "type": "shell",
+            "command": "/fred/oz305/haojiang/Lafter/packages/.conda/envs/lafter/bin/python",
+            "args": [
+                "main.py",
+                "--dataset", "sop_split1",
+                "--data_path", "/fred/oz305/haojiang/code/MaskCon_CVPR2023-main/Data/Stanford_Online_Products/Stanford_Online_Products",
+                "--wandb_id", "Stanford_Online_Products_Split1",
+                "--t0", "0.1",
+                "--t", "0.1",
+                "--w", "0.8",
+                "--mode", "maskcon",
+                "--gpu_id", "0",
+                "--aug_q", "strong",
+                "--aug_k", "weak"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
