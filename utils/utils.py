@@ -9,7 +9,7 @@ from PIL import Image, ImageEnhance, ImageOps
 from PIL import ImageFilter
 
 # __all__ = ['Cutout', 'ImageNetPolicy', 'CIFAR10Policy', 'CIFAR10PolicyAll', 'SVHNPolicy', 'SubPolicy', 'RandAugment', 'GaussianBlur', 'DMixTransform', 'get_augment']
-__all__ = ['DMixTransform', 'get_augment', 'adjust_learning_rate']
+__all__ = ['DMixTransform', 'get_augment', 'adjust_learning_rate','get_base_transform']
 
 
 def adjust_learning_rate(optimizer, warm_up, epoch, epochs, base_lr, i, iteration_per_epoch):
@@ -538,6 +538,24 @@ class DMixTransform:
             res += [trans(x) for _ in range(self.nums[i])]
         return res
 
+def get_base_transform(dataset):
+    if dataset == 'cars196' or dataset == 'sop_split1' or dataset == 'sop_split2':
+        size = 224
+    elif dataset == 'cifartoy_good' or dataset == 'cifartoy_bad' or dataset == 'cifar100' or dataset == 'imagenet32':
+        size = 32
+    else:
+        raise ValueError(f'dataset should not be {dataset}!')
+    
+    # ResNet的标准化参数
+    resnet_mean = [0.485, 0.456, 0.406]
+    resnet_std = [0.229, 0.224, 0.225]
+    
+    base_transform = transforms.Compose([
+        transforms.Resize(size=[size, size]),
+        transforms.ToTensor(),  # 将PIL图像转换为tensor
+        transforms.Normalize(mean=resnet_mean, std=resnet_std)  # ResNet标准化
+    ])
+    return base_transform
 
 def get_augment(dataset, mode='none'):
     if dataset == 'cifartoy_good' or dataset == 'cifartoy_bad':

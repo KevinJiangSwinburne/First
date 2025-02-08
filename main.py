@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from datasets import *
+from datasets.stml_sampler import NNBatchSampler
 from models import *
 from utils import *
 
@@ -25,7 +26,7 @@ parser.add_argument('--data_path', default='./data', type=str, help='train datas
 # model configs: [Almost fixed for all experiments]
 parser.add_argument('--arch', default='resnet18')
 parser.add_argument('--dim', default=256, type=int, help='feature dimension')
-parser.add_argument('--K', default=8192, type=int, help='queue size; number of negative keys')
+parser.add_argument('--K', default=8160, type=int, help='queue size; number of negative keys')
 parser.add_argument('--m', default=0.99, type=float, help='moco momentum of updating key encoder')
 parser.add_argument('--t0', default=0.1, type=float, help='softmax temperature for training')
 
@@ -33,7 +34,7 @@ parser.add_argument('--t0', default=0.1, type=float, help='softmax temperature f
 parser.add_argument('--lr', '--learning-rate', default=0.02, type=float, metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--epochs', default=200, type=int, metavar='N', help='number of total epochs')
 parser.add_argument('--warm_up', default=5, type=int, metavar='N', help='number of warmup epochs')
-parser.add_argument('--batch_size', default=128, type=int, metavar='N', help='mini-batch size')
+parser.add_argument('--batch_size', default=120, type=int, metavar='N', help='mini-batch size')
 parser.add_argument('--wd', default=5e-4, type=float, metavar='W', help='weight decay')
 
 # method configs:
@@ -46,7 +47,10 @@ parser.add_argument('--aug_k', default='strong', type=str, help='augmentation st
 # logger configs
 parser.add_argument('--wandb_id', type=str, help='wandb project name')
 parser.add_argument('--gpu_id', default='0', type=str, help='gpuid')
-
+parser.add_argument('--workers', default = 8, type = int,
+    dest = 'nb_workers',
+    help = 'Number of workers for dataloader.'
+)
 os.environ['TORCH_HOME'] = '/fred/oz305/haojiang/code/MaskCon_CVPR2023-main/.torchhome'
 os.environ["WANDB_MODE"] = "disabled"
 # train for one epoch
@@ -136,8 +140,8 @@ def retrieval(encoder, test_loader, K, chunks=10):
 
 def main_proc(args, model, train_loader, test_loader):
     wandb.init(project=args.wandb_id, entity='mrchenfeng', name='train_' + args.results_dir, group=f'train_{args.dataset}_{args.mode}')
-    wandb.config.update(args)
-    """### Start training"""
+    wandb.config.update(args) 
+    
     # define optimizer
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wd, momentum=0.9)
     epoch_start = 0
@@ -155,33 +159,93 @@ def main_proc(args, model, train_loader, test_loader):
     best_retrieval_top50 = 0
     best_retrieval_top100 = 0
 
-    model.initiate_memorybank(train_loader)
+    # Initialize base dataset with only basic transforms
+    base_transform = get_base_transform(args.dataset)
+    dataset_sampling = CARS196(root=args.data_path, split='train', transform=base_transform)
+    
+    # Initialize dataloader for feature extraction
+    dl_sampling = DataLoader(
+        dataset_sampling,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.nb_workers,
+        pin_memory=True
+    )
+
+    # Create dataset with contrastive learning augmentations
+    query_transform = get_augment(args.dataset, args.aug_q)
+    key_transform = get_augment(args.dataset, args.aug_k)
+    train_transform = DMixTransform([key_transform, query_transform], [1, 1])
+    
+    # Initialize first training loader with basic random sampling
+    dataset_train = CARS196(root=args.data_path, split='train', transform=train_transform)
+    train_loader = DataLoader(
+        dataset_train,
+        batch_size=args.batch_size,
+        shuffle=True,  # Use random sampling initially
+        num_workers=args.nb_workers,
+        pin_memory=True,
+        drop_last=True
+    )
 
     for epoch in range(epoch_start, args.epochs):
+        # Update sampling strategy less frequently and after initial training period
+        if epoch % 20 == 0 and epoch >= 40:  # Update every 20 epochs after epoch 40
+            print(f"Epoch {epoch}: Updating feature-based sampling...")
+            # Get features using current model state
+            model.eval()  # Set to evaluation mode for feature extraction
+            
+            # Create new sampler based on current model features
+            balanced_sampler = NNBatchSampler(
+                dataset_sampling, 
+                model.encoder_q,
+                dl_sampling,
+                args.batch_size,
+                nn_per_image=5,
+                using_feat=True
+            )
+            
+            # Create new train loader with updated sampler and contrastive augmentations
+            dataset_train = CARS196(root=args.data_path, split='train', transform=train_transform)
+            train_loader = DataLoader(
+                dataset_train,
+                num_workers=args.nb_workers,
+                pin_memory=True,
+                batch_sampler=balanced_sampler
+            )
+            
+            model.train()  # Set back to training mode
+
+        # Evaluation every 10 epochs
         if epoch % 10 == 0:
             retrieval_topk = retrieval(model.encoder_q, test_loader, [1, 2, 5, 10, 50, 100])
             retrieval_top1, retrieval_top2, retrieval_top5, retrieval_top10, retrieval_top50, retrieval_top100 = retrieval_topk
-            if retrieval_top1 > best_retrieval_top1:
-                best_retrieval_top1 = best_retrieval_top1
-            if retrieval_top2 > best_retrieval_top2:
-                best_retrieval_top2 = best_retrieval_top2
-            if retrieval_top5 > best_retrieval_top5:
-                best_retrieval_top5 = best_retrieval_top5
-            if retrieval_top10 > best_retrieval_top10:
-                best_retrieval_top10 = best_retrieval_top10
-            if retrieval_top50 > best_retrieval_top50:
-                best_retrieval_top50 = best_retrieval_top50
-            if retrieval_top100 > best_retrieval_top100:
-                best_retrieval_top100 = best_retrieval_top100
+            
+            # Update best metrics
+            best_retrieval_top1 = max(retrieval_top1, best_retrieval_top1)
+            best_retrieval_top2 = max(retrieval_top2, best_retrieval_top2)
+            best_retrieval_top5 = max(retrieval_top5, best_retrieval_top5)
+            best_retrieval_top10 = max(retrieval_top10, best_retrieval_top10)
+            best_retrieval_top50 = max(retrieval_top50, best_retrieval_top50)
+            best_retrieval_top100 = max(retrieval_top100, best_retrieval_top100)
 
-            wandb.log({'R@1': retrieval_top1, 'R@2': retrieval_top2, 'R@5': retrieval_top5, 'R@10': retrieval_top10, 'R@50': retrieval_top50, 'R@100': retrieval_top100}, step=epoch)
-            # save statistics
-            print(f'Epoch [{epoch}/{args.epochs}]: R@1: {retrieval_top1:.4f}, R@2: {retrieval_top2:.4f}, R@5: {retrieval_top5:.4f}, R@10: {retrieval_top10:.4f},  R@50: {retrieval_top50:.4f},R@100: {retrieval_top100:.4f}')
+            wandb.log({
+                'R@1': retrieval_top1, 'R@2': retrieval_top2, 'R@5': retrieval_top5,
+                'R@10': retrieval_top10, 'R@50': retrieval_top50, 'R@100': retrieval_top100
+            }, step=epoch)
+            
+            print(f'Epoch [{epoch}/{args.epochs}]: R@1: {retrieval_top1:.4f}, R@2: {retrieval_top2:.4f}, '
+                  f'R@5: {retrieval_top5:.4f}, R@10: {retrieval_top10:.4f}, R@50: {retrieval_top50:.4f}, '
+                  f'R@100: {retrieval_top100:.4f}')
             train_logs.write(
-                f'Epoch [{epoch}/{args.epochs}]: R@1: {retrieval_top1:.4f}, R@2: {retrieval_top2:.4f}, R@5: {retrieval_top5:.4f}, R@10: {retrieval_top10:.4f},  R@50: {retrieval_top50:.4f},R@100: {retrieval_top100:.4f}\n')
+                f'Epoch [{epoch}/{args.epochs}]: R@1: {retrieval_top1:.4f}, R@2: {retrieval_top2:.4f}, '
+                f'R@5: {retrieval_top5:.4f}, R@10: {retrieval_top10:.4f}, R@50: {retrieval_top50:.4f}, '
+                f'R@100: {retrieval_top100:.4f}\n')
             train_logs.flush()
 
+        # Train for one epoch
         train(model, train_loader, optimizer, epoch, args)
+        
     wandb.finish()
     return model
 
@@ -197,70 +261,29 @@ def main():
     np.random.seed(1228)
     torch.backends.cudnn.benchmark = True
 
-    """Define train/test"""
-    query_transform = get_augment(args.dataset, args.aug_q)
-    key_transform = get_augment(args.dataset, args.aug_k)
+    # Initialize test dataset
     test_transform = get_augment(args.dataset)
-
-    if args.dataset == 'cars196':
-        train_dataset = CARS196(root=args.data_path, split='train', transform=DMixTransform([key_transform, query_transform], [1, 1]))
-        test_dataset = CARS196(root=args.data_path, split='test', transform=test_transform)
-        args.num_classes = 8
-        args.size = 224
-
-    elif args.dataset == 'cifar100':
-        train_dataset = CIFAR100(root=args.data_path, download=True, transform=DMixTransform([key_transform, query_transform], [1, 1]))
-        test_dataset = CIFAR100(root=args.data_path, train=False, download=True, transform=test_transform)
-        args.num_classes = 20
-        args.size = 32
-
-    elif args.dataset == 'cifartoy_good':
-        train_dataset = CIFARtoy(root=args.data_path, split='good', download=True, transform=DMixTransform([key_transform, query_transform], [1, 1]))
-        test_dataset = CIFARtoy(root=args.data_path, split='good', train=False, download=True, transform=test_transform)
-        args.num_classes = 2
-        args.size = 32
-
-    elif args.dataset == 'cifartoy_bad':
-        train_dataset = CIFARtoy(root=args.data_path, split='bad', download=True, transform=DMixTransform([key_transform, query_transform], [1, 1]))
-        test_dataset = CIFARtoy(root=args.data_path, split='bad', train=False, download=True, transform=test_transform)
-        args.num_classes = 2
-        args.size = 32
-
-    elif args.dataset == 'sop_split2':
-        train_dataset = StanfordOnlineProducts(split='2', root=args.data_path, train=True, transform=DMixTransform([key_transform, query_transform], [1, 1]))
-        test_dataset = StanfordOnlineProducts(split='2', root=args.data_path, train=False, transform=test_transform)
-        args.num_classes = 12
-        args.size = 224
-
-    elif args.dataset == 'sop_split1':
-        train_dataset = StanfordOnlineProducts(split='1', root=args.data_path, train=True, transform=DMixTransform([key_transform, query_transform], [1, 1]))
-        test_dataset = StanfordOnlineProducts(split='1', root=args.data_path, train=False, transform=test_transform)
-        args.num_classes = 12
-        args.size = 224
-
-    elif args.dataset == 'imagenet32':
-        train_dataset = ImageNetDownSample(root=args.data_path, train=True, transform=DMixTransform([key_transform, query_transform], [1, 1]))
-        test_dataset = ImageNetDownSample(root=args.data_path, train=False, transform=test_transform)
-        args.num_classes = 12
-        args.size = 32
-        
-    else:
-        raise ValueError(f'{args.dataset} is not supported now!')
-
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, drop_last=True, pin_memory=True)
+    test_dataset = CARS196(root=args.data_path, split='test', transform=test_transform)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    # create trainer
-    trainer = MaskCon(num_classes_coarse=args.num_classes, dim=args.dim, K=args.K, m=args.m, T1=args.t0, arch=args.arch, size=args.size, T2=args.t, mode=args.mode).cuda()
+    # Initialize model
+    if args.dataset == 'cars196':
+        args.num_classes = 8
+        args.size = 224
+    trainer = MaskCon(num_classes_coarse=args.num_classes, dim=args.dim, K=args.K, m=args.m, T1=args.t0, 
+                      arch=args.arch, size=args.size, T2=args.t, mode=args.mode).cuda()
 
     args.results_dir = f'arch_[{args.arch}]_data[{args.dataset}]_epochs[{args.epochs}]_memorysize[{args.K}]_mode[{args.mode}]_contrastive_temperature[{args.t0}]_temperature_maskcon[{args.t}]_weight[{args.w}]]'
 
+    # Create necessary directories
     if not os.path.exists(args.wandb_id):
         os.mkdir(args.wandb_id)
     if not os.path.exists(f'{args.wandb_id}/{args.results_dir}'):
         os.mkdir(f'{args.wandb_id}/{args.results_dir}')
 
-    main_proc(args, trainer, train_loader, test_loader)
+    # Initialize with dummy loader - will be updated in main_proc
+    dummy_loader = DataLoader(CARS196(root=args.data_path, split='train', transform=None), batch_size=args.batch_size)
+    main_proc(args, trainer, dummy_loader, test_loader)
 
 
 if __name__ == '__main__':
